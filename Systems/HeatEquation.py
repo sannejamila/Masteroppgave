@@ -11,20 +11,20 @@ def create_sparse_tridiagonal(n, a = 1, b = -2, c = 1):
     return diags(diagonals, offsets=[-1, 0, 1]).toarray()
 
 
-
-def midpoint_method(u, un, t, f, Df, dt, M, tol=1e-12, max_iter=5):
+def midpoint_method(u_start, u_end, t, f, Df, dt, M, tol=1e-12, max_iter=5):
     I = np.eye(M)
-    F = lambda u_hat: 1/dt*(u_hat-u) - f((u+u_hat)/2, t+.5*dt)
-    J = lambda u_hat: 1/dt*I - 1/2*Df((u+u_hat)/2, t+.5*dt)
-    err = la.norm(F(un))
-    it = 0
-    while err > tol:
-        un = un - la.solve(J(un),F(un))
-        err = la.norm(F(un))
-        it += 1
-        if it > max_iter:
+    F = lambda u_hat: 1/dt*(u_hat-u_start) - f((u_start+u_hat)/2, t+.5*dt)
+    J = lambda u_hat: 1/dt*I - 1/2*Df((u_start+u_hat)/2, t+.5*dt)
+
+    error = la.norm(F(u_end))
+    j = 0
+    while error > tol:
+        u_end = u_end - la.solve(J(u_end),F(u_end))
+        error = la.norm(F(u_end))
+        j += 1
+        if j > max_iter:
             break
-    return un
+    return u_end
 
 class HeatEquation:
     def __init__(self,L= 1, N = 10, dt = 0.0025, T = 0.25, A = None,B = None, C = None, init_sampler = None, nstates = None, seed = 42, BC = True):
@@ -38,28 +38,18 @@ class HeatEquation:
         self.rng = np.random.default_rng(seed)
         self.name_system = "HeatEquation"
 
- 
         if A is None:
-            #Central diff approx of Laplacian u_xx
-            tridiag = create_sparse_tridiagonal(n=N+1) #N+1 hos sintef med -2500 øverst til høyre og nederst til venstre.
+            tridiag = create_sparse_tridiagonal(n=N+1)
             self.A = 1/self.dx**2*tridiag
-
         if B is None:
-            #Forward diff approx of u_x
-            #twodiag = create_sparse_tridiagonal(n=N+1, a = 0, b = -1, c = 1) #N+1 hos sintef med -50 nederst til venstre.
-            #self.B = 1/self.dx*twodiag
-            
             twodiag = create_sparse_tridiagonal(n=N+1, a = 0, b = -1, c = 1) #N+1 hos sintef med -50 nederst til venstre.
             self.B = 1/self.dx*twodiag
-
         if C is None:
             two_diag = create_sparse_tridiagonal(n=N+1, a = -1, b = 0, c = 1) 
             self.C = 0.5*1/self.dx*two_diag
 
         if BC == True:
             self.SetBoundaryConditions()
-
-        #self.lhs_matrix = self.dx * np.eye(N+1)
 
         if init_sampler is not None:
             self._initial_condition_sampler = init_sampler
@@ -68,6 +58,7 @@ class HeatEquation:
 
     def SetBoundaryConditions(self):
         A, B, C = self.A.copy(), self.B.copy(), self.C.copy()
+
         #Boundary conditions
         A[0,-1] = 1/self.dx**2
         A[-1,0] = 1/self.dx**2
@@ -81,8 +72,6 @@ class HeatEquation:
         self.B = B
         self.C = C
     
-
-        
     def V(self,u):
         #dV(u) = u_xx -> V(u) = -0.5 int(u_x^2) dx ??
         return np.sum(-0.5 * (np.matmul(self.B, u.T) ** 2).T, axis=1)
@@ -98,8 +87,6 @@ class HeatEquation:
     def ddV(self,u):
         #dV = Au -> ddV = A
         return self.A
-    
-  
     
     def _initial_condition_sampler(self):
         M = self.N+1
@@ -163,7 +150,7 @@ class HeatEquation:
             )
             u, t = out_ivp["y"].T, out_ivp["t"].T
         else:
-            dt = float(t[1] - t[0])                 # assumes uniform time grid             
+            dt = float(t[1] - t[0])                 #Assumes uniform time grid             
             I = np.eye(self.N+1)
 
             LHS = I - 0.5 * dt * self.A
@@ -187,26 +174,23 @@ class HeatEquation:
     
 
     def sample_trajectory_midpoint(self, t, u0=None, noise_std=0, add_noise=False):
-
         if u0 is None:
             u0 = self._initial_condition_sampler()
+        M = u0.shape[-1]
 
         u = np.zeros([t.shape[0], u0.shape[-1]])
         dudt = np.zeros_like(u)
         u[0, :] = u0
-
-        M = u0.shape[-1]
        
         f = lambda u, t: self.u_dot(u, t)
         Df = lambda u, t: self.u_dot_jacobian(u, t)
+
         for i, t_step in enumerate(t[:-1]):
             dt = t[i + 1] - t[i]
             dudt[i, :] = f(u[i, :], t[i])
-            u[i + 1, :] = midpoint_method(
-                u[i, :], u[i, :], t[i], f, Df, dt, M, 1e-12, 5
-            )
+            u[i + 1, :] = midpoint_method(u[i, :], u[i, :], t[i], f, Df, dt, M, 1e-12, 5)
 
-        # Add noise:
+        #Add noise:
         if add_noise:
             u += self.rng.normal(size=u.shape) * noise_std
             dudt += self.rng.normal(size=dudt.shape) * noise_std

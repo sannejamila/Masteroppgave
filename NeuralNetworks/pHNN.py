@@ -18,6 +18,7 @@ class ForwardPadding(nn.Module):
 
     def forward(self, u):
         return torch.cat([u, u[..., : self.d]], dim=-1)
+        
 
 
 class Summation(nn.Module):
@@ -44,116 +45,154 @@ class CentralPadding(nn.Module):
 
     def forward(self, u):
         return torch.cat([u[..., -self.d :], u, u[..., : self.d]], dim=-1)
+       
     
 
 
 class BaseNN(torch.nn.Module):
-    def __init__(self,nstates,noutputs=1, hidden_dim=50, act_1 = nn.Tanh(), act_2 = nn.Tanh()):
+    def __init__(self,nstates,noutputs=1, hidden_dim=50, timedependent = False, statedependent = True, spacedependent=False, act_1 = nn.Tanh(), act_2 = nn.Tanh()):
         #State dependent
+
         super().__init__()
 
         self.nstates = nstates
         self.noutputs = noutputs
         self.hidden_dim = hidden_dim
 
+        self.timedependent = timedependent
+        self.statedependent = statedependent
+        self.spacedependent = spacedependent
+
         self.act_1 = act_1
         self.act_2 = act_2
       
+        if not statedependent and not timedependent:
+            input_dim = 1
+            linear1 = nn.Linear(input_dim, hidden_dim)
+            linear2 = nn.Linear(hidden_dim, hidden_dim)
+            linear3 = nn.Linear(hidden_dim, noutputs)
 
-        input_dim = 1
-        pad = ForwardPadding(d=1)
-        conv1 = nn.Conv1d(input_dim, hidden_dim, kernel_size=2)
-        conv2 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1)
-        conv3 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1, bias=None)
-        summation = Summation()
+            self.model = nn.Sequential(
+                linear1,
+                act_1,
+                linear2,
+                act_2,
+                linear3,
+            )
+        else:
+            input_dim = 1
+            pad = ForwardPadding(d=1)
+            conv1 = nn.Conv1d(input_dim, hidden_dim, kernel_size=2)
+            conv2 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1)
+            conv3 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1, bias=None)
+            summation = Summation()
 
-        self.model = nn.Sequential(
-            pad,
-            conv1,
-            act_1,
-            conv2,
-            act_2,
-            conv3,
-            summation,
+            self.model = nn.Sequential(
+                pad,
+                conv1,
+                act_1,
+                conv2,
+                act_2,
+                conv3,
+                summation,
+            )
+
+        forward_map = {
+            (True,  True,  True):  self.forward_space_time_state,
+            (True,  True,  False): self.forward_time_space,
+            (True,  False, True):  self.forward_time_state,
+            (False, True,  True):  self.forward_space_state,
+            (True,  False, False): self.forward_time,
+            (False, True,  False): self.forward_space,
+            (False, False, True):  self.forward_state,
+            (False, False, False): self.forward_general,
+        }
+
+        key = (timedependent, spacedependent, statedependent)
+        self.forward = forward_map[key]
+       
+        
+
+    def spatial_basis(self, xspatial = None):
+        xsbasis = torch.cat(
+            [
+                torch.sin(2 * torch.pi / self.period * xspatial),
+                torch.cos(2 * torch.pi / self.period * xspatial),
+            ],
+            axis=-2,
         )
+        return xsbasis
+    
+    def forward_general(self, u=None, t=None, xspatial=None):
+        return self.model
 
-    def forward(self, u=None, t=None, xspatial=None):
+    def forward_state(self, u=None, t=None, xspatial=None):
         #Only state dependent, see PDEBaseNN in https://github.com/SINTEF/pseudo-hamiltonian-neural-networks/blob/091065ef3c1b730d56fd413b6373d0424d8114be/phlearn/phlearn/phnns/pde_models.py
         return self.model(u)
     
+    def forward_space(self, u=None, t=None, xspatial=None):
+        xsbasis = self.spatial_basis(xspatial=xspatial)
+        return self.model(xsbasis)
+    
+    def forward_time(self, u=None, t=None, xspatial=None):
+        return self.model(t)
+    
+    def forward_space_state(self, u=None, t=None, xspatial=None):
+        xsbasis = self.spatial_basis(xspatial=xspatial)
+        return self.model(torch.cat([u, xsbasis], dim=-2))
+    
+    def forward_time_state(self, u=None, t=None, xspatial=None):
+        ts = t.repeat_interleave(u.shape[-1], dim=-1)
+        return self.model(torch.cat([u, ts], dim=-2))
+    
+    def forward_time_space(self, u=None, t=None, xspatial=None):
+        xsbasis = self.spatial_basis(xspatial=xspatial)
+        ts = t.repeat_interleave(u.shape[-1], dim=-1)
+        return self.model(torch.cat([xsbasis, ts], dim=-2))
+    
+    def forward_space_time_state(self, u=None, t=None, xspatial=None):
+        xsbasis = self.spatial_basis(xspatial=xspatial)
+        ts = t.repeat_interleave(u.shape[-1], dim=-1)
+        return self.model(torch.cat([u, xsbasis, ts], dim=-2))
 
-class PDEpHNN(BaseNN):
-    def __init__(self,nstates, hidden_dim=100,period=20, number_of_intermediate_outputs=4, input_dim = 1, act_1 = nn.Tanh(), act_2 = nn.Tanh()):
+
+class PDEIntegralNN(BaseNN):
+    def __init__(self, nstates, hidden_dim=100):
+        super().__init__(nstates =nstates, noutputs = 1, hidden_dim=hidden_dim)
+
+
+class PDEExternalForcesNN(BaseNN):
+    def __init__(self,nstates,hidden_dim=100,period=20, timedependent=False, spacedependent=True, statedependent=False):
         noutputs = 1
-        super().__init__(nstates,noutputs,hidden_dim)
+        super().__init__(nstates,noutputs,hidden_dim,timedependent,statedependent,spacedependent=spacedependent)
+        self.nstates = nstates
+        self.noutputs = noutputs
+        self.hidden_dim = hidden_dim
+        self.spacedependent = spacedependent
+        self.timedependent = timedependent
+        self.statedependent = statedependent
         self.period = period
-        self.number_of_intermediate_outputs = number_of_intermediate_outputs
-        self.act_1 = act_1
-        self.act_2 = act_2
-        
-        
-        pad = CentralPadding(d=2)
-        hidden_dim_pre = 20
-        dnn_pre = nn.Sequential(
-            nn.Conv1d(input_dim, hidden_dim_pre, kernel_size=1),
-            act_1,
-            nn.Conv1d(hidden_dim_pre, hidden_dim_pre, kernel_size=1),
-            act_2,
-            nn.Conv1d(hidden_dim_pre, hidden_dim_pre, kernel_size=1),
-            act_2,
-            nn.Conv1d(hidden_dim_pre, hidden_dim_pre, kernel_size=1),
-            act_2,
-            nn.Conv1d(
-                hidden_dim_pre,
-                number_of_intermediate_outputs * input_dim,
-                kernel_size=1,
-            ),
-        )
 
-        conv1 = nn.Conv1d(
-            number_of_intermediate_outputs * input_dim, hidden_dim, kernel_size=5
-        )
-        conv2 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1)
-        conv3 = nn.Conv1d(hidden_dim, noutputs, kernel_size=1, bias=None)
 
-        self.model = nn.Sequential(
-            pad,
-            dnn_pre,
-            conv1,
-            act_1,
-            conv2,
-            act_2,
-            conv3,
-        )
+        if not statedependent and not timedependent and not spacedependent:
+            self.model = nn.Parameter(torch.tensor([0.0], dtype=torch.float32))
+        else:
+            input_dim = (
+                int(statedependent) + int(timedependent) + 2 * int(spacedependent)
+            )
+            conv1 = nn.Conv1d(input_dim, hidden_dim, kernel_size=1)
+            conv2 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1)
+            conv3 = nn.Conv1d(hidden_dim, noutputs, kernel_size=1)
 
-"""  
-class PDEIntegralNN(PDEpHNN):
-    def __init__(self, nstates, hidden_dim=100):
-        # was: super().__init__(nstates, 1, hidden_dim)
-        super().__init__(nstates, hidden_dim=hidden_dim)
-"""
-class PDEIntegralNN(nn.Module):
-    """
-    State-only integral approximator: input (N,1,L) -> scalar (N,1)
-    via 1D convs over state then Summation.
-    """
-    def __init__(self, nstates, hidden_dim=100):
-        super().__init__()
-        self.model = nn.Sequential(
-            # same as your BaseNN “state only” stack
-            ForwardPadding(d=1),
-            nn.Conv1d(1, hidden_dim, kernel_size=2),
-            nn.Tanh(),
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1),
-            nn.Tanh(),
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1, bias=None),
-            Summation(),  # <- sums to shape (N, 1, 1)
-        )
+            self.model = nn.Sequential(
+                conv1,
+                nn.Tanh(),
+                conv2,
+                nn.Tanh(),
+                conv3,
+            )
 
-    def forward(self, u):
-        # returns (N,1,1); you can squeeze later if you like
-        return self.model(u)
-
+            self.input_dim = input_dim
 
 
 class SymConvOperator_estimator(torch.nn.Module):
@@ -164,19 +203,18 @@ class SymConvOperator_estimator(torch.nn.Module):
         self.kernel_size = kernel_size
         d = int((kernel_size - 1) / 2)
         self.d = d
-        self.lhs = torch.nn.Parameter(torch.zeros(d), requires_grad=True)
+        self.ls = torch.nn.Parameter(torch.zeros(d), requires_grad=True)
 
     def forward(self, u=None):
         #Damping Matrix
         if self.kernel_size == 0:
             return torch.tensor([0]).reshape(1, 1, 1)
         else:
-            return torch.concat([self.lhs, torch.tensor([1]), self.lhs]).reshape(1, 1, self.kernel_size)
+            return torch.concat([self.ls, torch.tensor([1]), self.ls]).reshape(1, 1, self.kernel_size)
 
 
 
 class SkewSymConvOperator_estimator(torch.nn.Module):
-   
    
     def __init__(self, kernel_size=3):
         super().__init__()
@@ -184,32 +222,15 @@ class SkewSymConvOperator_estimator(torch.nn.Module):
         if self.kernel_size > 1:
             d = int((kernel_size - 3) / 2)
             self.d = d
-            self.lhs = torch.nn.Parameter(d, requires_grad=True)
+            self.ls = torch.nn.Parameter(torch.zeros(d), requires_grad=True)
 
     def forward(self, u=None):
         #Damping Matrix
         if self.kernel_size == 0 or self.kernel_size == 1:
             return torch.tensor([0]).reshape(1, 1, 1)
         else:
-            return torch.concat([-self.lhs, torch.tensor([-1.0, 0.0, 1.0]), self.lhs]).reshape(1, 1, self.kernel_size)
-"""
-class SkewSymConvOperator_estimator(torch.nn.Module):
-    def __init__(self, kernel_size=3):
-        super().__init__()
-        self.kernel_size = kernel_size
-        if self.kernel_size > 1:
-            d = (kernel_size - 3) // 2
-            self.ls = torch.nn.Parameter(torch.zeros(d), requires_grad=True)  # vector
+            return torch.concat([-self.ls, torch.tensor([-1.0, 0.0, 1.0]), self.ls]).reshape(1, 1, self.kernel_size)
 
-    def forward(self, u=None):
-        if self.kernel_size in (0, 1):
-            return torch.tensor([0.0]).reshape(1,1,1)
-        # concat [-ls, -1, 0, 1, ls]
-        return torch.cat(
-            [-self.ls, torch.tensor([-1.0, 0.0, 1.0]), self.ls]
-        ).reshape(1,1,self.kernel_size)
-
-"""
 
 class PDE_PHNN(torch.nn.Module):
     def __init__(self,nstates,kernel_sizes=[1, 3, 1, 0], init_sampler=None, V=None, H=None, f=None, R=None, S=None, A=None):
@@ -231,6 +252,7 @@ class PDE_PHNN(torch.nn.Module):
         else:
             self.H = PDEIntegralNN(nstates=self.nstates)
 
+
         if S is not None:
             self.S = S
             self.is_trainable_S = False
@@ -243,8 +265,6 @@ class PDE_PHNN(torch.nn.Module):
         else:
             self.R = SymConvOperator_estimator(kernel_size=self.kernel_sizes[2])
             self.is_trainable_R = True
-
-
         if A is not None:
             self.A = A
             self.is_trainable_A = False
@@ -255,7 +275,6 @@ class PDE_PHNN(torch.nn.Module):
 
         
     def dV(self, u):
-        #u = u.detach().requires_grad_()
         u = u.clone().requires_grad_(True)
         return torch.autograd.grad(self.V(u).sum(),u,retain_graph=self.training,create_graph=self.training)[0]
     
@@ -272,7 +291,6 @@ class PDE_PHNN(torch.nn.Module):
 
 
     def dH(self, u):
-        #u = u.detach().requires_grad_()
         u = u.clone().requires_grad_(True)
         return torch.autograd.grad(self.H(u).sum(),u,retain_graph=self.training,create_graph=self.training)[0]
     
@@ -306,11 +324,7 @@ class PDE_PHNN(torch.nn.Module):
                 dV = self.dV(u)
             d = int((self.kernel_sizes[2]-1) / 2)
             dV_padded = torch.cat([dV[..., self.nstates -d:], dV, dV[..., :d]], dim=-1)
-            #print("dV", dV)
-           
-          
             rhs += -torch.nn.functional.conv1d(dV_padded, R)
-            #print("rhs", rhs)
 
         if self.kernel_sizes[3] != 0:
             if self.f is not None:
@@ -331,30 +345,16 @@ class PDE_PHNN(torch.nn.Module):
             A_dudt = torch.nn.functional.conv1d(dudt_pad, A)
             return A_dudt
         
-    """
-        
-    def time_derivative_step(self, integrator, u_start, dt,t_start, u_end=None, xspatial=None):
-        #integrator, u_start, u_end, t_start, t_end, dt, xspatial=None)
-        if integrator == "RK4":
-            return RK4_time_derivative(self.u_dot ,u_start, dt, t_start, xspatial)
-        elif integrator == "midpoint":
-            #return symplectic_midpoint_time_derivative(self.u_dot, u_start, dt, t_start, xspatial, u_end)
-            t_end = t_start
-            x_mid = (u_end + u_start) / 2
-            t_mid = (t_end + t_start) / 2
-            return self.u_dot(x_mid, t_mid, xspatial=xspatial)
-    """
+
     def time_derivative_step(self, integrator, u_start, dt, t_start, t_end = None ,u_end=None, xspatial=None):
         if integrator == "RK4":
             return RK4_time_derivative(self.u_dot ,u_start, dt, t_start, xspatial)
         elif integrator == "midpoint":
-            #return symplectic_midpoint_time_derivative(u_dot = self.u_dot, u_start = u_start, dt = dt, t_start = t_start, t_end = t_end, xspatial=xspatial, u_end=u_end)
             u_mid = (u_end + u_start) / 2
             if t_end == None:
                 t_end = t_start + dt
             t_mid = (t_end + t_start) / 2
             return self.u_dot(u_mid, t_mid, xspatial=xspatial)
-
 
                                                       
      
@@ -363,6 +363,7 @@ class PDE_PHNN(torch.nn.Module):
         if u0 is None:
             u0 = self._initial_condition_sampler(1)
 
+        M = u0.shape[0]
         if self.kernel_sizes[0] == 1:
             if xspatial is not None:
                 def u_dot(t, u):
@@ -370,13 +371,31 @@ class PDE_PHNN(torch.nn.Module):
                     t = torch.tensor(np.array(t).reshape((1, 1)), dtype=torch.float32)
                     xspatial =torch.tensor(np.array(xspatial).reshape(1, xspatial.shape[-1]), dtype=torch.float32)
                     return self.u_dot(u,t,xspatial=xspatial).detach().numpy().flatten()
-
             else:
                 def u_dot(t, u):
                     u = torch.tensor(u.reshape(1, u.shape[-1]), dtype=torch.float32)
                     t = torch.tensor(np.array(t).reshape((1, 1)), dtype=torch.float32)
                     return self.u_dot(u,t).detach().numpy().flatten()
-    
+        else:
+            d = int((self.kernel_sizes[0] - 1) / 2)
+            A = self.A().detach().numpy()
+            diagonals = np.concatenate([A[0, :, (d + 1) :], A[0], A[0, :, : -(d + 1)]], axis=1).T.repeat(M, axis=1)
+            offsets = np.concatenate([np.arange(-M + 1, -M + 1 + d), np.arange(-d, d + 1), np.arange(M - d, M)])
+            D = diags(diagonals, offsets, (M, M)).toarray()
+
+            if xspatial is not None:
+                def u_dot(t, u):
+                    u = torch.tensor(u.reshape(1, u.shape[-1]), dtype=torch.float32)
+                    t = torch.tensor(np.array(t).reshape((1, 1)), dtype=torch.float32)
+                    xspatial = torch.tensor(np.array(xspatial).reshape(1, xspatial.shape[-1]), dtype=torch.float32)
+                    return np.linalg.solve(D,self.u_dot(u, t, xspatial).detach().numpy().flatten())
+            else:
+                def u_dot(t, u):
+                    u = torch.tensor(u.reshape(1, u.shape[-1]), dtype=torch.float32)
+                    t = torch.tensor(np.array(t).reshape((1, 1)), dtype=torch.float32)
+                    return np.linalg.solve(D,self.u_dot(u, t).detach().numpy().flatten())
+                
         out_ivp = solve_ivp(fun=u_dot,t_span=(t_sample[0], t_sample[-1]),y0=u0.detach().numpy().flatten(),t_eval=t_sample,rtol=1e-10)
         U = out_ivp["y"].T
+
         return U, None

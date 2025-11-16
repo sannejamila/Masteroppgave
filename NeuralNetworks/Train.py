@@ -78,23 +78,10 @@ class Training():
             else:
                 u_start, u_end, t_start, t_end, dt, xspatial = input_tuple
                 t_args = (t_start.detach(),)
-            
-           # u_start, u_end, dudt = u_start.squeeze(1), u_end.squeeze(1), dudt.squeeze(1)
 
-            #n, m = u_start.shape
-            #if n == 1:
-               # u_start = u_start.view(-1)
-            #dudt = dudt.view(n, m)
             lhs_est  = model.time_derivative_step(integrator = self.integrator, u_start = u_start, dt = dt,t_start = t_start, t_end = t_end, u_end=u_end, xspatial=xspatial)
-            
-            
-            
-            #time_derivative_step(self.integrator, u_start, dt,t_start, u_end=u_end, xspatial = xspatial)
-            
-            #time_derivative_step(self.integrator,u_start,dt,u_end,*t_args) 
             lhs = model.lhs(dudt)
-            #print(f"lhs_est: {lhs_est}")
-            #print(f"lhs: {lhs}")
+
             loss = loss_func(lhs, lhs_est)
             if penalty_func is not None:
                 penalty = penalty_func(model, *t_args)
@@ -110,8 +97,7 @@ class Training():
     def compute_validation_loss(self,model,valdata_batched, loss_func,penalty_func=None):
         model.eval()
         val_loss = 0
-        
-     
+
         for i, (input_tuple, dudt) in enumerate(valdata_batched):
             if len(input_tuple) == 3:
                 u_start, u_end, dt = input_tuple
@@ -123,17 +109,11 @@ class Training():
                 u_start, u_end, t_start, t_end, dt, xspatial = input_tuple
                 t_args = (t_start.detach(),)
 
-
-           # n,m = u_start.shape
-           # if n ==1:
-            #    u_start = u_start.view(-1)
-          #  dudt = dudt.view(n,m)
             with torch.enable_grad():
                 lhs_est = model.time_derivative_step(integrator = self.integrator, u_start=u_start, dt = dt,t_start = t_start, t_end = t_end, u_end=u_end, xspatial = xspatial)
-
                 lhs = model.lhs(dudt)
-
             val_loss += loss_func(lhs,lhs_est).item()
+
             if penalty_func is not None:
                 val_loss += penalty_func(model, *t_args)
     
@@ -165,15 +145,13 @@ class Training():
         training_time = 0
 
         train_loader, val_loader = self.to_dataset(self.train_data,self.shuffle), self.to_dataset(self.val_data, shuffle = False)
-
-
+        
         with trange(self.epochs) as steps:
             start = datetime.datetime.now() 
             for epoch in steps:
                 train_batch = train_loader
                 self.model.train(True) 
                 avg_loss = self.train_one_epoch(model,train_batch,loss_func,optimizer,penalty_func)
-                #print(f"avg_loss: {avg_loss}")
                 loss_list.append(avg_loss)
                 self.model.train(False) 
                 if self.verbose:
